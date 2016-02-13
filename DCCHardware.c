@@ -69,57 +69,42 @@ uint16_t zero_high_count=199; //100us
 uint16_t zero_low_count=199; //100us
 
 /// Setup phase: configure and enable timer1 CTC interrupt, set OC1A and OC1B to toggle on CTC
-void setup_DCC_waveform_generator() {
-  
- //Set the OC1A and OC1B pins (Timer1 output pins A and B) to output mode
- //On Arduino UNO, etc, OC1A is Port B/Pin 1 and OC1B Port B/Pin 2
- //On Arduino MEGA, etc, OC1A is or Port B/Pin 5 and OC1B Port B/Pin 6
-#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__) || defined(__AVR_AT90CAN128__) || defined(__AVR_AT90CAN64__) || defined(__AVR_AT90CAN32__)
-  DDRB |= (1<<DDB5) | (1<<DDB6);
-#else
-  DDRB |= (1<<DDB1) | (1<<DDB2);
-#endif
+void setup_DCC_waveform_generator() 
+{
+	DDRB |= _BV(DDB7);
 
   // Configure timer1 in CTC mode, for waveform generation, set to toggle OC1A, OC1B, at /8 prescalar, interupt at CTC
-  TCCR1A = (0<<COM1A1) | (1<<COM1A0) | (0<<COM1B1) | (1<<COM1B0) | (0<<WGM11) | (0<<WGM10);
-  TCCR1B = (0<<ICNC1)  | (0<<ICES1)  | (0<<WGM13)  | (1<<WGM12)  | (0<<CS12)  | (1<<CS11) | (0<<CS10);
+	TCCR1A = _BV(COM1C0);
 
-  // start by outputting a '1'
-  OCR1A = OCR1B = one_count; //Whenever we set OCR1A, we must also set OCR1B, or else pin OC1B will get out of sync with OC1A!
-  TCNT1 = 0; //get the timer rolling (not really necessary? defaults to 0. Just in case.)
-    
-  //finally, force a toggle on OC1B so that pin OC1B will always complement pin OC1A
-  TCCR1C |= (1<<FOC1B);
+	TCCR1B = (1 << WGM12)   /* Enable CTC mode */
+			 | (1 << CS11);   /* Divide the clock by 8 */
 
+	// start by outputting a '1'
+	OCR1A = OCR1C = one_count; //Whenever we set OCR1A, we must also set OCR1B, or else pin OC1B will get out of sync with OC1A!
+
+
+	TCNT1 = 0; /* Init timer to start at 0 */
+	TIMSK1 |= _BV(OCIE1C); /* enable the compare match interrupt */
 }
 
 void DCC_waveform_generation_hasshin()
 {
   //enable the compare match interrupt
-  TIMSK1 |= (1<<OCIE1A);
+  TIMSK1 |= (1<<OCIE1C);
 }
 
 /// This is the Interrupt Service Routine (ISR) for Timer1 compare match.
-ISR(TIMER1_COMPA_vect)
+ISR(TIMER1_COMPC_vect)
 {
   //in CTC mode, timer TCINT1 automatically resets to 0 when it matches OCR1A. Depending on the next bit to output,
   //we may have to alter the value in OCR1A, maybe.
   //to switch between "one" waveform and "zero" waveform, we assign a value to OCR1A.
   
-  //remember, anything we set for OCR1A takes effect IMMEDIATELY, so we are working within the cycle we are setting.
-  //first, check to see if we're in the second half of a uint8_t; only act on the first half of a uint8_t
-  //On Arduino UNO, etc, OC1A is digital pin 9, or Port B/Pin 1
-  //On Arduino MEGA, etc, OC1A is digital pin 11, or Port B/Pin 5
-#if defined(__AVR_ATmega1280__) || defined(__AVR_ATmega2560__) || defined(__AVR_AT90CAN128__) || defined(__AVR_AT90CAN64__) || defined(__AVR_AT90CAN32__)
-  if(PINB & (1<<PINB6)) //if the pin is low, we need to use a different zero counter to enable streched-zero DC operation
-#else
-  if(PINB & (1<<PINB1)) //if the pin is low, we need to use a different zero counter to enable streched-zero DC operation
-#endif
-
+  if (PINB & _BV(PINB7))
   {
     if(OCR1A == zero_high_count) //if the pin is low and outputting a zero, we need to be using zero_low_count
       {
-        OCR1A = OCR1B = zero_low_count;
+        OCR1A = OCR1C = zero_low_count;
       }
   }
   else //the pin is high. New cycle is begining. Here's where the real work goes.
@@ -133,7 +118,7 @@ ISR(TIMER1_COMPA_vect)
         if(!current_uint8_t_counter) //if no new packet
         {
 //          Serial.println("X");
-          OCR1A = OCR1B = one_count; //just send ones if we don't know what else to do. safe bet.
+          OCR1A = OCR1C = one_count; //just send ones if we don't know what else to do. safe bet.
           break;
         }
         //looks like there's a new packet for us to dump on the wire!
@@ -151,14 +136,14 @@ ISR(TIMER1_COMPA_vect)
         DCC_state = dos_send_preamble; //and fall through to dos_send_preamble
       /// Preamble: In the process of producing 14 '1's, counter by current_bit_counter; when complete, move to dos_send_bstart
       case dos_send_preamble:
-        OCR1A = OCR1B = one_count;
+        OCR1A = OCR1C = one_count;
 //        Serial.print("P");
         if(!--current_bit_counter)
           DCC_state = dos_send_bstart;
         break;
       /// About to send a data uint8_t, but have to peceed the data with a '0'. Send that '0', then move to dos_send_uint8_t
       case dos_send_bstart:
-        OCR1A = OCR1B = zero_high_count;
+        OCR1A = OCR1C = zero_high_count;
         DCC_state = dos_send_uint8_t;
         current_bit_counter = 8;
 //        Serial.print(" 0 ");
@@ -167,12 +152,12 @@ ISR(TIMER1_COMPA_vect)
       case dos_send_uint8_t:
         if(((current_packet[current_packet_size-current_uint8_t_counter])>>(current_bit_counter-1)) & 1) //is current bit a '1'?
         {
-          OCR1A = OCR1B = one_count;
+          OCR1A = OCR1C = one_count;
 //          Serial.print("1");
         }
         else //or is it a '0'
         {
-          OCR1A = OCR1B = zero_high_count;
+          OCR1A = OCR1C = zero_high_count;
 //          Serial.print("0");
         }
         if(!--current_bit_counter) //out of bits! time to either send a new uint8_t, or end the packet
@@ -189,7 +174,7 @@ ISR(TIMER1_COMPA_vect)
         break;
       /// Done with the packet. Send out a final '1', then head back to dos_idle to check for a new packet.
       case dos_end_bit:
-        OCR1A = OCR1B = one_count;
+        OCR1A = OCR1C = one_count;
         DCC_state = dos_idle;
         current_bit_counter = 14; //in preparation for a premable...
 //        Serial.println(" 1");
